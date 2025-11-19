@@ -1,0 +1,194 @@
+tic;
+
+
+noise_dbm=-80;
+noise=10^((noise_dbm-30)/10);
+%noise=1;
+
+P_ts_d = linspace(-30, 10, 30);
+P_ts = 10.^((P_ts_d-30) / 10);
+
+N = 4;
+iterations = 1e6;
+omega = 1; 
+
+delta_n_square = noise; % in watts for long range
+threshold_dB = 3;
+threshold=10^(threshold_dB/10);% in Watts
+P_dBm=-60;
+P=10.^((P_dBm-30) / 10);
+r=2.5;
+theta=1/2;
+N_max=20;
+
+beta_u=0.5;
+d_1=3;
+tau=-3;
+h_si=gamrnd(r, theta,1,iterations);
+
+shape_hs = [3,4,5];
+mean_outage_probabilities = zeros(length(shape_hs),length(P_ts));
+analytic_outage = zeros(length(shape_hs),length(P_ts));
+numeric_analytic_outage = zeros(length(shape_hs),length(P_ts));
+mean_capacity = zeros(length(shape_hs),length(P_ts));
+analytic_capacity= zeros(length(shape_hs),length(P_ts));
+z = (threshold*P) ./(d_1^(4*tau).* beta_u^2 .* P_ts);
+
+for k=1:length(shape_hs)
+    shape_h = shape_hs(k);
+    scale = omega / shape_h;
+    hs = sqrt(gamrnd(shape_h, scale, N,iterations));
+    gs = sqrt(gamrnd(shape_h, scale, N,iterations));
+    ns = sqrt(gamrnd(shape_h, scale, N,iterations));
+    ms = sqrt(gamrnd(shape_h, scale, N,iterations));
+    H = sum(hs .* gs .* ms .* ns);
+    H = H.^2;
+
+    for i = 1:length(P_ts)
+        SNR = d_1^(4*tau).* beta_u^2 .* P_ts(i) .* H ./ (P.*h_si+noise);   
+        count = sum(SNR < threshold);
+        mean_outage_probabilities(k,i) = count / iterations;
+        mean_capacity(k,i) = mean(log2(1+SNR));
+    end
+
+    mu=(omega/shape_h)^(1/2) * gamma(shape_h+1/2)/gamma(shape_h);
+    mean_ratio = N * mu^4;
+    Var_ratio = N * (omega^4-mu^8);
+    alpha = mean_ratio^2/Var_ratio;
+    beta= Var_ratio/mean_ratio;
+
+    analytic_outage(k,:) = calculate_series(z, alpha, r, beta, theta, 320);
+    numeric_analytic_outage(k, :) = compute_ratio_cdf(z, alpha, r, theta, beta);
+
+    %% Ergodic capacity
+    C=d_1^(4*tau).* beta_u^2 .* P_ts./P;
+    expectation_SNR=alpha*(alpha+1)*beta^2/((r-1)*theta);
+    variance_SNR = alpha*(alpha+1)*beta^4/((r-1)*theta^2)*((alpha+2)*(alpha+3)/(r-2)-alpha*(alpha+1)/(r-1));
+    %analytic_capacity(k, :) = log2(1+C .* expectation_SNR);
+    analytic_capacity(k, :) = log2(1+C .* expectation_SNR)-C.^2 .* variance_SNR/(2.*(1+C.*expectation_SNR));
+
+end
+ 
+
+
+
+% Convert parameters to symbolic
+% alpha = sym(alpha);
+% r = sym(r);
+% beta = sym(beta);
+% theta = sym(theta);
+% 
+% % Pre-factor (symbolic)
+% C = (theta^(alpha/2)) / ( gamma(alpha)*gamma(r)*beta^alpha*sqrt(sym(pi)) );
+% 
+% % Define single-point symbolic evaluation
+% f_single = @(xx) double( C * xx^(alpha/2) * ...
+%     meijerG( ...
+%         [1 - alpha/2, -alpha/2 - r + 1], ...   % upper
+%         [0, 1/2, -alpha/2], ...                % lower
+%         theta*xx/(4*beta^2) ) );
+
+% Vector evaluation
+%analytic_outage = compute_ratio_cdf(z, alpha, r, theta, beta);
+
+% Plot results
+mse=zeros(1, length(shape_hs));
+figure;
+hold on;
+for i=1:length(shape_hs)
+    plot(P_ts_d, mean_outage_probabilities(i,:), '*', 'LineWidth', 1.5);
+    plot(P_ts_d, analytic_outage(i, :), 'b', 'LineWidth', 1.5);
+    %plot(P_ts_d, numeric_analytic_outage(i, :), 'r', 'LineWidth', 1.5);
+    mse(i)=mean((mean_outage_probabilities(i, :)-numeric_analytic_outage(i,:)).^2);
+
+end
+title('Outage probability vs. P_t');
+xlabel('P_t (dB)');
+ylabel('Outage probability');
+set(gca, 'YScale', 'log');  % Set y-axis to log scale
+ylim([1e-6, 1e0]);          % Set y-axis limits from 10^-6 to 10^0
+grid on;                   % Add grid for clarity
+legend('Simulation', 'Analytical')%,'Numerical');
+hold off;
+
+
+figure;
+hold on;
+for i=1:length(shape_hs)
+    plot(P_ts_d, mean_capacity(i,:), '*', 'LineWidth', 1.5);
+    plot(P_ts_d, analytic_capacity(i, :), 'b', 'LineWidth', 1.5);
+end
+title('Ergodic Capacity vs. P_t');
+xlabel('P_t (dB)');
+ylabel('Capacity');
+grid on;                   % Add grid for clarity
+legend('Simulation', 'Upper bound')%,'Numerical');
+hold off;
+
+executionTime = toc;
+fprintf('Execution Time: %.4f seconds\n', executionTime);
+
+function Fz = compute_ratio_cdf(z, alpha, r, theta, beta)
+
+    % Precompute constant factor
+    C = 1./(gamma(r)*(theta^r));
+
+    % Allocate output
+    Fz = zeros(size(z));
+
+    % Loop only over z-grid (integration remains scalar per z)
+    for k = 1:numel(z)
+
+        zk = z(k);
+
+        % Define integrand as function of x
+        integrand = @(x) gammainc( sqrt(zk.*x)./beta , alpha , 'lower') ...
+                          .* x.^(r-1) .* exp(-x./theta);
+
+        % Numerical integration from 0 to infinity
+        Fz(k) = C * integral(integrand, 0, Inf, ...
+                             'RelTol',1e-6,'AbsTol',1e-12);
+    end
+end
+
+function result = calculate_series(z, alpha, r, beta, theta, max_terms)
+% Calculate the series expression for array z
+% Expression: (theta*z)^(alpha/2) / (gamma(alpha)*gamma(r)*beta^alpha) * 
+%             sum_{n=0}^∞ [(-1)^n * (z*theta)^(n/2) * gamma((alpha+n)/2 + r) / 
+%             (n! * (alpha+n) * beta^n)]
+%
+% Inputs:
+%   z - array of input values
+%   alpha, r, beta, theta - parameters
+%   max_terms - maximum number of terms in the series (default: 100)
+%
+% Output:
+%   result - array of same size as z with computed values
+
+    if nargin < 6
+        max_terms = 100; % Default number of terms
+    end
+    
+    if nargin < 5
+        error('Not enough input arguments. Need at least z, alpha, r, beta, theta');
+    end
+    
+    % Initialize result array
+    result = zeros(size(z));
+    
+    % Precompute constant factor
+    const_factor = (theta * z).^(alpha/2) ./ (gamma(alpha) * gamma(r) * beta^alpha);
+    
+    % Series summation
+    for n = 0:max_terms
+        % Calculate term for current n
+        term = ((-1).^n .* (z * theta).^(n/2) .* gamma((alpha + n)/2 + r)) ./ ...
+               (factorial(n) .* (alpha + n) .* beta^n);
+        
+        % Add term to result
+        result = result + term;
+    end
+    
+    % Multiply by constant factor
+    result = const_factor .* result;
+end
